@@ -210,22 +210,19 @@ class ConvexService: ObservableObject {
     }
     // MARK: - Audio Upload
 
-    /// Uploads an audio file to Convex storage
-    func uploadAudioFile(audioFileURL: URL, meetingId: UUID) async throws -> String? {
+    /// Uploads an audio file to Convex storage.
+    /// - Parameters:
+    ///   - audioFileURL: Local file URL to upload.
+    ///   - meetingId: Meeting this file belongs to (unused by backend; for callers).
+    ///   - previousStorageId: If set, the previous Convex storage file for this meeting is deleted after a successful upload so we keep one file per meeting instead of many.
+    /// - Returns: The new Convex storage ID, or nil on failure.
+    func uploadAudioFile(audioFileURL: URL, meetingId: UUID, previousStorageId: String? = nil) async throws -> String? {
         guard let client = client else { return nil }
 
-        // 1. Get upload URL
-        // IMPORTANT: This calls a Convex MUTATION (not action)
-        // The function name must match your Convex backend export:
-        // - If in files.ts: "files:generateUploadUrl"
-        // - If in storage.ts: "storage:generateUploadUrl"
-        // - If in audio.ts: "audio:generateUploadUrl"
-        // Update the function name below to match your backend structure
         do {
             let uploadUrl: String = try await client.mutation("files:generateUploadUrl", with: [:])
             guard let url = URL(string: uploadUrl) else { return nil }
 
-            // 2. Upload file
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("audio/m4a", forHTTPHeaderField: "Content-Type")
@@ -237,21 +234,35 @@ class ConvexService: ObservableObject {
                 return nil
             }
 
-            // 3. Parse response to get storageId
             struct UploadResponse: Decodable {
                 let storageId: String
             }
-
             let uploadResponse = try JSONDecoder().decode(UploadResponse.self, from: responseData)
-            return uploadResponse.storageId
+            let newStorageId = uploadResponse.storageId
+
+            // Delete previous file so we keep one file per meeting (avoid redundant files on stop/resume)
+            if let previous = previousStorageId, !previous.isEmpty {
+                do {
+                    try await deleteStorageId(previous)
+                    print("🗑️ [Sync] Deleted previous Convex file: \(previous.prefix(12))...")
+                } catch {
+                    print("⚠️ [Sync] Failed to delete previous file \(previous.prefix(12))...: \(error.localizedDescription)")
+                    print("   💡 Ensure your backend has 'files:deleteStorageId' deployed (npx convex deploy)")
+                }
+            } else {
+                print("📤 [Sync] No previous storage ID to delete (first upload for this meeting)")
+            }
+            return newStorageId
         } catch {
             print("❌ [ConvexService] Failed to upload audio file: \(error)")
-            print("   💡 Make sure your Convex backend has a mutation named 'files:generateUploadUrl'")
-            print("   💡 The function should be defined as: export const generateUploadUrl = mutation({ ... })")
-            print("   💡 If your function is in a different file, update the name (e.g., 'storage:generateUploadUrl' or 'audio:generateUploadUrl')")
-            print("   💡 Ensure your Convex backend is running (npx convex dev) or deployed (npx convex deploy)")
             throw error
         }
+    }
+
+    /// Deletes a file from Convex storage by ID. Used to remove the previous audio file when replacing with a new upload.
+    func deleteStorageId(_ storageId: String) async throws {
+        guard let client = client else { return }
+        try await client.mutation("files:deleteStorageId", with: ["storageId": storageId])
     }
 }
 

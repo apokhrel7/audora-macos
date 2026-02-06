@@ -2,19 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>NSAudioCaptureUsageDescription</key>
-	<string>Audora captures audio for transcription. The mic following feature records only when other apps are using the microphone.</string>
-	<key>SUEnableInstallerLauncherService</key>
-	<true/>
-	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/psycho-baller/audora/main/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>BVXHOV8ZxPxKZ1swhFndymzew9nyd3si7849JA9cqsg=</string>
-	<key>CLERK_PUBLISHABLE_KEY</key>
-	<string>$(CLERK_PUBLISHABLE_KEY)</string>
-	<key>CONVEX_DEPLOYMENT_URL</key>
-	<string>$(CONVEX_DEPLOYMENT_URL)</string>
-		<key>CFBundleURLTypes</key>
+	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
@@ -25,5 +13,17 @@
 			</array>
 		</dict>
 	</array>
+	<key>CLERK_PUBLISHABLE_KEY</key>
+	<string>$(CLERK_PUBLISHABLE_KEY)</string>
+	<key>CONVEX_DEPLOYMENT_URL</key>
+	<string>$(CONVEX_DEPLOYMENT_URL)</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Audora captures audio for transcription. The mic following feature records only when other apps are using the microphone.</string>
+	<key>SUEnableInstallerLauncherService</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/psycho-baller/audora/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>BVXHOV8ZxPxKZ1swhFndymzew9nyd3si7849JA9cqsg=</string>
 </dict>
 </plist>

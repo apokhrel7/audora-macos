@@ -143,10 +143,6 @@ class MeetingViewModel: ObservableObject {
         if recordingSessionManager.isRecordingMeeting(meeting.id) {
             let liveChunks = recordingSessionManager.getTranscriptChunks(for: meeting.id)
             self.meeting.transcriptChunks = liveChunks
-            print("🔄 [MeetingViewModel] Loaded \(liveChunks.count) live chunks for recording meeting")
-        } else {
-            // Not recording - ensure we have the saved chunks from storage
-            print("🔄 [MeetingViewModel] Meeting not recording, using saved chunks: \(self.meeting.transcriptChunks.count)")
         }
 
         // Listen to real-time transcript updates for this meeting if it's being recorded
@@ -156,7 +152,6 @@ class MeetingViewModel: ObservableObject {
                 guard let self = self else { return }
                 // Only update if this meeting is the active recording
                 if recordingSessionManager.isRecordingMeeting(self.meeting.id) {
-                    print("🔄 [MeetingViewModel] Updating chunks from recording: \(updatedChunks.count) chunks")
                     self.meeting.transcriptChunks = updatedChunks
                 }
             }

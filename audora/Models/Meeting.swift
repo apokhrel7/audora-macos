@@ -107,12 +107,13 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
     var source: TranscriptionSource  // How this session was created
     var analytics: SpeechAnalytics?  // Speech analytics for this session
     var audioFileURL: String?  // Path to the saved audio recording file
+    var audioStorageId: String?  // Convex storage ID for the uploaded audio (one per meeting; replaced on each upload)
     var calendarEventId: String?  // Link to source calendar event (if created from calendar)
     // MARK: - Data versioning
     /// Version of this TranscriptionSession record on disk. Useful for migration.
     var dataVersion: Int
     /// Current app data version. Increment whenever you make a breaking change to `TranscriptionSession` that requires migration.
-    static let currentDataVersion = 4  // Incremented for audio file and calendarEventId support
+    static let currentDataVersion = 5  // Added audioStorageId for replace-instead-of-duplicate uploads
     
     init(id: UUID = UUID(),
          date: Date = Date(),
@@ -124,6 +125,7 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
          source: TranscriptionSource = .manual,
          analytics: SpeechAnalytics? = nil,
          audioFileURL: String? = nil,
+         audioStorageId: String? = nil,
          calendarEventId: String? = nil,
          dataVersion: Int = TranscriptionSession.currentDataVersion) {
         self.id = id
@@ -136,6 +138,7 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
         self.source = source
         self.analytics = analytics
         self.audioFileURL = audioFileURL
+        self.audioStorageId = audioStorageId
         self.calendarEventId = calendarEventId
         self.dataVersion = dataVersion
     }
@@ -216,8 +219,17 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
                 currentTexts = [chunk.text]
                 currentTimestamp = chunk.timestamp
             } else {
-                // Same source, add to current section
-                currentTexts.append(chunk.text)
+                // Same source: avoid duplicating when chunks are cumulative or identical
+                let text = chunk.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let last = currentTexts.last?.trimmingCharacters(in: .whitespacesAndNewlines), !last.isEmpty {
+                    if text == last || text.hasPrefix(last) {
+                        currentTexts[currentTexts.count - 1] = text
+                    } else {
+                        currentTexts.append(text)
+                    }
+                } else {
+                    currentTexts.append(text)
+                }
             }
         }
 

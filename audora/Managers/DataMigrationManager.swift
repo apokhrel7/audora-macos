@@ -19,7 +19,26 @@ class DataMigrationManager {
             return nil
         }
 
-        // Future migrations can be added here as `switch` cases.
+        // Migrate 4 -> 5: add audioStorageId (nil), bump dataVersion
+        if meeting.dataVersion == 4 {
+            let migrated = Meeting(
+                id: meeting.id,
+                date: meeting.date,
+                title: meeting.title,
+                transcriptChunks: meeting.transcriptChunks,
+                userNotes: meeting.userNotes,
+                generatedNotes: meeting.generatedNotes,
+                templateId: meeting.templateId,
+                source: meeting.source,
+                analytics: meeting.analytics,
+                audioFileURL: meeting.audioFileURL,
+                audioStorageId: nil,
+                calendarEventId: meeting.calendarEventId,
+                dataVersion: 5
+            )
+            return migrated
+        }
+
         if meeting.dataVersion < Meeting.currentDataVersion {
             print("⚠️ No migration path for versions \(meeting.dataVersion + 1)...\(Meeting.currentDataVersion)")
             return nil

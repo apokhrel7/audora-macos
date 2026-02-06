@@ -50,6 +50,9 @@ class AudioManager: NSObject, ObservableObject {
     // Session refresh timers to prevent 30-minute expiry
     private var sessionRefreshTimers: [AudioSource: Timer] = [:]
 
+    // Last AudioAdded seq_no per source (required for EndOfStream so Speechmatics releases the session)
+    private var lastAudioSeqNo: [AudioSource: Int] = [.mic: 0, .system: 0]
+
     // Add reference to ConvexService
     var convexService: ConvexService? = ConvexService.shared
 
@@ -208,6 +211,9 @@ class AudioManager: NSObject, ObservableObject {
 
         // Stop microphone capture
         cleanupAudioEngine()
+
+        // Send EndOfStream so Speechmatics releases the session
+        sendEndOfStreamIfNeeded()
 
         // Close WebSocket
         micSocketTask?.cancel(with: .normalClosure, reason: nil)
@@ -566,11 +572,16 @@ class AudioManager: NSObject, ObservableObject {
         cleanupAudioEngine()
         micRetryCount = 0
 
-        // Close WebSocket
-        micSocketTask?.cancel(with: .normalClosure, reason: nil)
-        micSocketTask = nil
-        systemSocketTask?.cancel(with: .normalClosure, reason: nil)
-        systemSocketTask = nil
+        // Send EndOfStream so Speechmatics releases the session (avoids hitting concurrent session limit on resume)
+        sendEndOfStreamIfNeeded()
+
+        // Close WebSocket after a short delay so EndOfStream can be sent
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.micSocketTask?.cancel(with: .normalClosure, reason: nil)
+            self?.micSocketTask = nil
+            self?.systemSocketTask?.cancel(with: .normalClosure, reason: nil)
+            self?.systemSocketTask = nil
+        }
 
         // Invalidate ping timers
         pingTimers.values.forEach { $0.invalidate() }
@@ -580,9 +591,21 @@ class AudioManager: NSObject, ObservableObject {
         sessionRefreshTimers.values.forEach { $0.invalidate() }
         sessionRefreshTimers.removeAll()
 
-
-
         print("Recording stopped")
+    }
+
+    /// Sends EndOfStream to each active Speechmatics connection so the server releases the session.
+    /// Without this, pausing then resuming opens new sessions and can hit the concurrent session limit.
+    private func sendEndOfStreamIfNeeded() {
+        if let task = micSocketTask, task.state == .running {
+            let seqNo = lastAudioSeqNo[.mic] ?? 0
+            sendMessage(["message": "EndOfStream", "last_seq_no": seqNo], source: .mic)
+        }
+        if let task = systemSocketTask, task.state == .running {
+            let seqNo = lastAudioSeqNo[.system] ?? 0
+            sendMessage(["message": "EndOfStream", "last_seq_no": seqNo], source: .system)
+        }
+        lastAudioSeqNo = [.mic: 0, .system: 0]
     }
 
     private func processAudioBuffer(_ buffer: AVAudioPCMBuffer, converter: AVAudioConverter, targetFormat: AVAudioFormat, source: AudioSource) {
@@ -718,7 +741,7 @@ class AudioManager: NSObject, ObservableObject {
             ],
             "transcription_config": [
                 "language": "en",
-                "enable_partials": true,
+                "enable_partials": false,
                 "max_delay": 2
             ]
         ]
@@ -853,66 +876,73 @@ class AudioManager: NSObject, ObservableObject {
 
         switch messageType {
         case "AddTranscript", "AddPartialTranscript":
-            // Handle transcriptions (both AddTranscript and AddPartialTranscript work the same way)
-            guard let metadata = json["metadata"] as? [String: Any],
-                  let results = json["results"] as? [[String: Any]] else { return }
+            // Match backend web app (CurrentView.tsx): enable_partials false, only AddTranscript.
+            // Each result is one word or punctuation. Accumulate into buffer; commit only on is_eos.
+            // Defensive: ensure "results" is an array of dicts (avoid crash if API sends wrong type, e.g. date/number)
+            guard let metadata = json["metadata"] as? [String: Any] else { return }
+            guard let rawResults = json["results"],
+                  rawResults is [Any],
+                  let results = rawResults as? [[String: Any]] else { return }
 
             var transcriptBuffer = ""
-            var isFinal = false
-
-            // Check if this is a final transcript (Speechmatics default is partial unless finalized)
-            // Actually Speechmatics V2 sends 'AddTranscript' for both.
-            // We use 'is_approximate' or similar fields if available, but usually V2 results are additive/corrections.
-            // Simplified: If 'transcript' field exists in metadata, use it? No.
-            // Iterate results.
-
-            for result in results {
-                if let alternatives = result["alternatives"] as? [[String: Any]],
-                   let firstAlt = alternatives.first,
-                   let content = firstAlt["content"] as? String {
-                     transcriptBuffer += content + " "
+            var sawEndOfSentence = false
+            for rawResult in results {
+                guard let result = rawResult as? [String: Any] else { continue }
+                guard let alternatives = result["alternatives"] as? [[String: Any]],
+                      let firstAlt = alternatives.first,
+                      let content = firstAlt["content"] as? String, !content.isEmpty else { continue }
+                if (result["is_eos"] as? Bool) == true { sawEndOfSentence = true }
+                let type = result["type"] as? String ?? "word"
+                if type == "word" {
+                    transcriptBuffer += (transcriptBuffer.isEmpty ? "" : " ") + content
+                } else if type == "punctuation" {
+                    transcriptBuffer += content
                 }
             }
-
-            // Cleanup buffer
             transcriptBuffer = transcriptBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-            if transcriptBuffer.isEmpty { return }
+            if transcriptBuffer.isEmpty && !sawEndOfSentence { return }
 
-            // Speechmatics V2 sends finalized results when "is_eos" is true?
-            // Or look at 'type' in results?
-            // For now, treat all AddTranscript as partials updating the current view,
-            // unless we determine it's a stabilized segment.
-            // To properly match OpenAI's 'delta' vs 'completed', we'd need to track sequence numbers.
-            // For simplicity in this migration: treating as STREAMING updates.
+            let messageText = transcriptBuffer
+            let shouldCommit = sawEndOfSentence
 
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
 
-                // For Speechmatics, AddTranscript usually contains new words.
-                // However, without complex logic, we might just append?
-                // Actually, 'results' contains a list of words.
+                // Accumulate across messages (like web sentenceBuffer); commit only when is_eos.
+                let existing = self.currentInterim[source] ?? ""
+                let newBuffer: String
+                if existing.isEmpty {
+                    newBuffer = messageText
+                } else if messageText.isEmpty {
+                    newBuffer = existing
+                } else {
+                    newBuffer = (existing + " " + messageText).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                self.currentInterim[source] = newBuffer
 
-                // Let's assume we treat it as an update to the current "Interim"
-                self.currentInterim[source] = (self.currentInterim[source] ?? "") + " " + transcriptBuffer
-
-                // Update the UI chunk (marking as interim)
-                // IMPORTANT: Only remove interim chunks that we created in THIS session
-                // Don't remove existing final chunks from previous sessions when resuming
-                // We identify "this session" interim chunks by checking if they're recent and interim
-                let now = Date()
-                if let lastIndex = self.transcriptChunks.lastIndex(where: { chunk in
-                    !chunk.isFinal && chunk.source == source && abs(chunk.timestamp.timeIntervalSince(now)) < 60
-                }) {
+                // Remove previous interim chunk for this source
+                if let lastIndex = self.transcriptChunks.lastIndex(where: { !$0.isFinal && $0.source == source }) {
                     self.transcriptChunks.remove(at: lastIndex)
                 }
 
-                let chunk = TranscriptChunk(
-                    timestamp: Date(),
-                    source: source,
-                    text: self.currentInterim[source] ?? "",
-                    isFinal: false // Keep it false until EndOfTranscript or explicit finalization logic
-                )
-                self.transcriptChunks.append(chunk)
+                if shouldCommit && !newBuffer.isEmpty {
+                    // End of sentence: append final chunk and clear buffer (match web app)
+                    self.transcriptChunks.append(TranscriptChunk(
+                        timestamp: Date(),
+                        source: source,
+                        text: newBuffer,
+                        isFinal: true
+                    ))
+                    self.currentInterim[source] = ""
+                } else if !newBuffer.isEmpty {
+                    // In progress: single interim chunk
+                    self.transcriptChunks.append(TranscriptChunk(
+                        timestamp: Date(),
+                        source: source,
+                        text: newBuffer,
+                        isFinal: false
+                    ))
+                }
             }
 
         case "EndOfTranscript":
@@ -923,30 +953,31 @@ class AudioManager: NSObject, ObservableObject {
                  let finalText = self.currentInterim[source] ?? ""
                  if finalText.isEmpty { return }
 
-                 // Remove only interim chunks for THIS source that were created in THIS session
-                 // Don't remove existing final chunks from previous sessions
-                 // We identify "this session" chunks by checking if they're interim and match the source
-                 let chunksBeforeRemoval = self.transcriptChunks.count
-                 self.transcriptChunks.removeAll { chunk in
+                 // Work with a local copy to avoid any corruption/type confusion (e.g. count sent to wrong type)
+                 var chunks = self.transcriptChunks
+                 let chunksBeforeRemoval = chunks.count
+                 chunks.removeAll { chunk in
                      !chunk.isFinal && chunk.source == source
                  }
-                 
-                 // Only append final chunk if we actually had interim text to finalize
-                 // This prevents clearing existing chunks when resuming
-                 if chunksBeforeRemoval > self.transcriptChunks.count || !finalText.isEmpty {
-                     let chunk = TranscriptChunk(
+                 if chunksBeforeRemoval > chunks.count || !finalText.isEmpty {
+                     chunks.append(TranscriptChunk(
                          timestamp: Date(),
                          source: source,
                          text: finalText,
                          isFinal: true
-                     )
-                     self.transcriptChunks.append(chunk)
+                     ))
                  }
+                 self.transcriptChunks = chunks
                  self.currentInterim[source] = ""
              }
 
         case "AudioAdded":
-            // Ack
+            if let seqNo = json["seq_no"] as? Int {
+                // Update on main thread only; lastAudioSeqNo is also read from main in sendEndOfStreamIfNeeded
+                DispatchQueue.main.async { [weak self] in
+                    self?.lastAudioSeqNo[source] = seqNo
+                }
+            }
             break
 
         case "Error":
